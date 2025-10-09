@@ -84,7 +84,6 @@ def main():
     """Main startup function"""
     print("🚀 Starting PDF → MCQs → Google Form Web Interface")
     print("=" * 60)
-    
     # Check requirements
     if not check_requirements():
         sys.exit(1)
@@ -110,7 +109,7 @@ def main():
     
     # Start the Flask server
     try:
-        from server.app import app
+        from app import app
         # Open browser after a short delay
         import threading
         import time

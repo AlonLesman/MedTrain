@@ -20,7 +20,6 @@ fi
 # Activate virtual environment
 echo "🔧 Activating virtual environment..."
 source venv/bin/activate
-
 # Install/update dependencies
 echo "📥 Installing dependencies..."
 pip install -r requirements.txt
@@ -61,4 +60,5 @@ echo "🔐 Login with password: changeme (or set PIPELINE_PASSWORD in .env)"
 echo "🛑 Press Ctrl+C to stop the server"
 echo "=" * 60
 
-python3 start_web_interface.py
+
+python3 start_local_web_interface.py

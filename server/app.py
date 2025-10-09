@@ -17,9 +17,7 @@ from dotenv import load_dotenv, find_dotenv
 from pdf_to_questions import generate_mcqs_to_file
 from create_form_from_json import create_form_from_json
 
-# Load environment variables
-env_path = find_dotenv()
-load_dotenv(env_path, override=True)
+load_dotenv('/secrets/.env')
 
 app = Flask(__name__)
 

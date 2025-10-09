@@ -364,14 +364,7 @@ def save_outputs(payload: Dict[str, Any], output_dir: str) -> List[str]:
 
 
 def main():
-    # Load .env deterministically and override any pre-set envs
-    env_path = find_dotenv()
-    load_dotenv(env_path, override=True)
-    # Logging may not be configured yet; emit a simple print fallback as well
-    try:
-        logging.info(f".env file loaded from: {env_path or 'NOT FOUND'}")
-    except Exception:
-        print(f".env file loaded from: {env_path or 'NOT FOUND'}")
+    load_dotenv('/secrets/.env')
 
     # Accept VERBOSITY as numeric or string (INFO/DEBUG/ERROR)
     v_raw = (os.getenv("VERBOSITY") or "1").strip().upper()
