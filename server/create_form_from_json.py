@@ -252,7 +252,6 @@ def get_sa_creds(sa_file: Optional[str]):
     
     return creds
 
-
 def create_form_from_json(json_path: str, auth_method: str = "oauth", sa_file: Optional[str] = None, share_with: Optional[str] = None):
     """Create Google Form from MCQ JSON file with comprehensive logging."""
     
@@ -508,7 +507,7 @@ def run_pipeline_from_env():
         num_questions = 4
 
     # Form envs
-    auth_method = (os.getenv("AUTH_METHOD") or "oauth").strip().lower()
+    auth_method = (os.getenv("FORMS_AUTH_MODE") or "oauth").strip()
     sa_file = (os.getenv("SA_FILE") or "").strip().strip('"').strip("'") or None
     share_with = (os.getenv("SHARE_WITH") or "").strip().strip('"').strip("'") or None
 
@@ -540,7 +539,7 @@ def main():
     
     # Load environment variables with validation
     json_path = os.getenv("JSON_PATH", "").strip().strip('"').strip("'")
-    auth_method = os.getenv("AUTH_METHOD", "oauth").strip().lower()
+    auth_method = os.getenv("FORMS_AUTH_METHOD", "oauth").strip().lower()
     sa_file = os.getenv("SA_FILE", "").strip().strip('"').strip("'")
     share_with = os.getenv("SHARE_WITH", "").strip().strip('"').strip("'")
     
@@ -612,6 +611,5 @@ def main():
 
 
 if __name__ == "__main__":
-    env_path = find_dotenv()
-    load_dotenv(env_path, override=True)
+    load_dotenv('/secrets/.env')
     main()
