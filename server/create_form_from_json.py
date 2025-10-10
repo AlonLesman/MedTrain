@@ -507,7 +507,7 @@ def run_pipeline_from_env():
         num_questions = 4
 
     # Form envs
-    auth_method = (os.getenv("FORMS_AUTH_MODE") or "oauth").strip()
+    auth_method = (os.getenv("FORMS_AUTH_METHOD") or "oauth").strip()
     sa_file = (os.getenv("SA_FILE") or "").strip().strip('"').strip("'") or None
     share_with = (os.getenv("SHARE_WITH") or "").strip().strip('"').strip("'") or None
 
