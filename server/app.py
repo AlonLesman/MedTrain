@@ -354,7 +354,7 @@ def form():
 @require_auth
 def pipeline():
     """Handle PDF → MCQs → Google Form pipeline"""
-    FORMS_AUTH_MODE = os.getenv('FORMS_AUTH_MODE', 'oauth')
+    FORMS_AUTH_MOTHOD = os.getenv('FORMS_AUTH_MOTHOD', 'oauth')
     try:
         # Validate required fields
         if 'pdf' not in request.files:
@@ -441,7 +441,7 @@ def pipeline():
             try:
                 form_edit_url = create_form_from_json(
                     json_path=mcqs_json_path, 
-                    auth_method=FORMS_AUTH_MODE
+                    auth_method=FORMS_AUTH_MOTHOD
                 )
                 if form_edit_url:
                     logger.info(f"✅ Google Form created successfully: {form_edit_url}")
