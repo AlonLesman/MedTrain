@@ -2,3 +2,4 @@
 client_secret.json
 run_local.sh
 token.pkl
+service_account.json

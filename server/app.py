@@ -441,7 +441,8 @@ def pipeline():
             try:
                 form_edit_url = create_form_from_json(
                     json_path=mcqs_json_path, 
-                    auth_method=FORMS_AUTH_METHOD
+                    auth_method=FORMS_AUTH_METHOD,
+                    sa_file=os.getenv('SA_FILE')
                 )
                 if form_edit_url:
                     logger.info(f"✅ Google Form created successfully: {form_edit_url}")
