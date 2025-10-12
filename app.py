@@ -16,6 +16,7 @@ from dotenv import load_dotenv, find_dotenv
 # Import our existing pipeline components
 from pdf_to_questions import generate_mcqs_to_file
 from create_form_from_json import create_form_from_json
+from token_utils import save_env_to_json
 
 load_dotenv('/secrets/.env')
 
@@ -355,6 +356,8 @@ def form():
 def pipeline():
     """Handle PDF → MCQs → Google Form pipeline"""
     FORMS_AUTH_METHOD = os.getenv('FORMS_AUTH_METHOD', 'oauth')
+    if FORMS_AUTH_METHOD == 'sa':
+        save_env_to_json('CLIENT_SECRET', 'client_secret.json')
     try:
         # Validate required fields
         if 'pdf' not in request.files:

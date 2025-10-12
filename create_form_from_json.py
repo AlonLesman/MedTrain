@@ -279,10 +279,10 @@ def create_form_from_json(json_path: str, auth_method: str = "oauth", sa_file: O
     start_time = time.time()
     
     try:
-        if auth_method == "sa":
-            creds = get_sa_creds(sa_file)
-        else:
-            creds = get_oauth_creds()
+        # if auth_method == "sa":
+        #     creds = get_sa_creds(sa_file)
+        # else:
+        creds = get_oauth_creds()
         
         auth_time = time.time() - start_time
         log(f"✅ Authentication completed in {auth_time:.2f} seconds", "info")

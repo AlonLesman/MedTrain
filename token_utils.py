@@ -56,3 +56,36 @@ def get_client_secret_path() -> str:
         str: Path to client_secret.json
     """
     return "client_secret.json"
+
+import os
+import json
+
+def save_env_to_json(env_var_name: str, output_file: str = "env_output.json"):
+    """
+    Reads an environment variable and saves it as a JSON file.
+
+    Args:
+        env_var_name (str): The name of the environment variable to read.
+        output_file (str): The name of the JSON file to create (default: 'env_output.json').
+
+    Raises:
+        ValueError: If the environment variable is not found.
+    """
+    # Get the environment variable
+    value = os.getenv(env_var_name)
+
+    if value is None:
+        raise ValueError(f"Environment variable '{env_var_name}' not found.")
+
+    # Create a dictionary to store the variable
+    data = {env_var_name: value}
+
+    # Write to JSON file
+    with open(output_file, "w") as f:
+        json.dump(data, f, indent=4)
+
+    print(f"✅ Saved {env_var_name} to {output_file}")
+
+
+# Example usage:
+# save_env_to_json("API_KEY", "config.json")
