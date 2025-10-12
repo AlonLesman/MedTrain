@@ -37,7 +37,7 @@ wheels/
 *.so
 .Python
 *$py.class
-
+.env.bak
 # --- Virtual environments ---
 venv/
 env/
