@@ -13,6 +13,9 @@ import json
 import traceback
 from dotenv import load_dotenv, find_dotenv
 
+# For Google Drive API sharing
+from googleapiclient.discovery import build
+
 # Import our existing pipeline components
 from pdf_to_questions import generate_mcqs_to_file
 from create_form_from_json import create_form_from_json
@@ -233,6 +236,11 @@ FORM_TEMPLATE = '''
             </select>
         </div>
         
+        <div class="form-group">
+            <label for="share_with">Share with (email, optional):</label>
+            <input id="share_with" type="email" placeholder="you@example.com">
+        </div>
+        
         <button type="submit" id="submitBtn">Generate Google Form</button>
     </form>
     
@@ -256,10 +264,12 @@ FORM_TEMPLATE = '''
             const pdf = document.getElementById('pdf').files[0];
             const count = document.getElementById('count').value;
             const lang = document.getElementById('lang').value;
+            const shareWith = (document.getElementById('share_with').value || '').trim();
             
             fd.append('pdf', pdf);
             fd.append('num_questions', count);
             fd.append('language', lang);
+            fd.append('share_with', shareWith);
 
             try {
                 const res = await fetch('/api/pipeline', { 
@@ -439,13 +449,17 @@ def pipeline():
             
             logger.info(f"Requested language: {language}")
             
-            # Step 2: JSON → Google Form (OAuth)
+            # Step 2: JSON → Google Form
             logger.info("Step 2: Creating Google Form from MCQs JSON...")
             try:
+                share_with = (request.form.get('share_with') or '').strip()
+                if not share_with:
+                    share_with = (os.getenv('SHARE_WITH') or '').strip()
                 form_edit_url = create_form_from_json(
-                    json_path=mcqs_json_path, 
+                    json_path=mcqs_json_path,
                     auth_method=FORMS_AUTH_METHOD,
-                    sa_file=os.getenv('SA_FILE')
+                    sa_file=os.getenv('SA_FILE'),
+                    share_with=share_with if share_with else None
                 )
                 if form_edit_url:
                     logger.info(f"✅ Google Form created successfully: {form_edit_url}")
@@ -455,6 +469,63 @@ def pipeline():
                 logger.error(f"❌ Google Form creation failed with exception: {e}")
                 logger.error(f"📄 Google Form error traceback: {traceback.format_exc()}")
                 form_edit_url = None
+
+            # Step 3: Share Google Form if requested
+            share_success = None
+            drive_share_error = None
+            drive_response = None
+            file_id = None
+            if form_edit_url and share_with:
+                # Try to extract the file ID from the form_edit_url
+                import re
+                m = re.search(r'/d/([a-zA-Z0-9_-]+)', form_edit_url)
+                if m:
+                    file_id = m.group(1)
+                    logger.info(f"Extracted Google Form file ID: {file_id}")
+                else:
+                    logger.error(f"Could not extract file ID from form_edit_url: {form_edit_url}")
+                if file_id:
+                    try:
+                        # Reuse credentials from the Forms flow if possible
+                        creds = None
+                        if FORMS_AUTH_METHOD == 'sa':
+                            # Use service account credentials
+                            from google.oauth2 import service_account
+                            sa_file = os.getenv('SA_FILE') or 'client_secret.json'
+                            creds = service_account.Credentials.from_service_account_file(
+                                sa_file,
+                                scopes=[
+                                    'https://www.googleapis.com/auth/drive',
+                                    'https://www.googleapis.com/auth/forms.body',
+                                    'https://www.googleapis.com/auth/forms.responses.readonly'
+                                ]
+                            )
+                        else:
+                            # Use pickled OAuth user credentials (token.pkl)
+                            import pickle
+                            token_path = os.getenv('TOKEN_PATH') or '/secrets/token.pkl'
+                            with open(token_path, 'rb') as token:
+                                creds = pickle.load(token)
+                        drive_service = build('drive', 'v3', credentials=creds)
+                        permission = {
+                            'type': 'user',
+                            'role': 'writer',
+                            'emailAddress': share_with
+                        }
+                        drive_response = drive_service.permissions().create(
+                            fileId=file_id,
+                            body=permission,
+                            sendNotificationEmail=False
+                        ).execute()
+                        import json as _jsonmod
+                        logger.info(f"Drive API response: {_jsonmod.dumps(drive_response, indent=2)}")
+                        logger.info(f"✅ Shared Google Form with {share_with} via Drive API")
+                        share_success = True
+                    except Exception as e:
+                        logger.error(f"❌ Failed to share Google Form with {share_with}: {e}")
+                        logger.error(f"Drive API error traceback: {traceback.format_exc()}")
+                        share_success = False
+                        drive_share_error = str(e)
             
             # Return success response
             response_data = {
@@ -464,9 +535,12 @@ def pipeline():
                 "pdf_filename": pdf_filename,
                 "num_questions": num_questions,
                 "language": language,
-                "model": model
+                "model": model,
+                "shared_with": share_with if share_with else None,
+                "share_success": share_success,
+                "drive_share_error": drive_share_error
             }
-            
+
             logger.info("Pipeline completed successfully")
             return jsonify(response_data)
             

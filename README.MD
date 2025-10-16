@@ -102,3 +102,9 @@ To deploy Medtrain on Google Cloud Run, follow these steps:
 
 5. After configuration, click **Deploy** to finalize the deployment.
 
+6. TODO:
+- Update the readme with how to run the app on SA and how to mount a volume
+- Create deployment pipeline 
+- Decide about where to store the forms
+- Support share_with text field
+- FinOps
