@@ -48,7 +48,7 @@ LOGIN_TEMPLATE = '''
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Login - PDF → MCQs → Google Form</title>
+    <title>Login - PDF → MCQs Google Form Generator</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -56,6 +56,8 @@ LOGIN_TEMPLATE = '''
             margin: 100px auto;
             padding: 20px;
             line-height: 1.6;
+            background: url('/BG.webp') no-repeat center center fixed;
+            background-size: cover;
         }
         h1 {
             color: #333;
@@ -123,7 +125,7 @@ FORM_TEMPLATE = '''
 <html>
 <head>
     <meta charset="utf-8">
-    <title>PDF → MCQs → Google Form</title>
+    <title>PDF → MCQs Google Form Generator</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -131,6 +133,27 @@ FORM_TEMPLATE = '''
             margin: 0 auto;
             padding: 20px;
             line-height: 1.6;
+            background: url('/BG.webp') no-repeat center center fixed;
+            background-size: cover;
+        }
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.6); /* light translucent layer */
+            z-index: 0;
+        }
+        .form-container {
+            position: relative;
+            z-index: 1;
+            background: rgba(255, 255, 255, 0.85);
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            max-width: 700px;
+            margin: 50px auto;
         }
         h1 {
             color: #333;
@@ -162,6 +185,7 @@ FORM_TEMPLATE = '''
         }
         input, select {
             width: 100%;
+            box-sizing: border-box;
             padding: 8px 12px;
             border: 1px solid #ddd;
             border-radius: 4px;
@@ -211,40 +235,42 @@ FORM_TEMPLATE = '''
     </style>
 </head>
 <body>
-    <h1>
-        PDF → MCQs → Google Form
-        <a href="/logout" class="logout-btn">Logout</a>
-    </h1>
-    
-    <form id="f">
-        <div class="form-group">
-            <label for="pdf">PDF File:</label>
-            <input id="pdf" type="file" accept="application/pdf" required>
-        </div>
+    <div class="overlay"></div>
+    <div class="form-container">
+        <h1>
+            PDF → MCQs Google Form Generator
+            <a href="/logout" class="logout-btn">Logout</a>
+        </h1>
         
-        <div class="form-group">
-            <label for="count">Number of Questions:</label>
-            <input id="count" type="number" min="1" max="20" value="6">
-        </div>
+        <form id="f">
+            <div class="form-group">
+                <label for="pdf">PDF File:</label>
+                <input id="pdf" type="file" accept="application/pdf" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="count">Number of Questions:</label>
+                <input id="count" type="number" min="1" max="20" value="6">
+            </div>
+            
+            <div class="form-group">
+                <label for="lang">Language:</label>
+                <select id="lang">
+                    <option value="en" selected>English</option>
+                    <option value="he">Hebrew</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="share_with">Share with (email, optional):</label>
+                <input id="share_with" type="email" placeholder="you@example.com">
+            </div>
+            
+            <button type="submit" id="submitBtn">Generate Google Form</button>
+        </form>
         
-        <div class="form-group">
-            <label for="lang">Language:</label>
-            <select id="lang">
-                <option value="en" selected>English</option>
-                <option value="he">Hebrew</option>
-                <option value="pl">Polish</option>
-            </select>
-        </div>
-        
-        <div class="form-group">
-            <label for="share_with">Share with (email, optional):</label>
-            <input id="share_with" type="email" placeholder="you@example.com">
-        </div>
-        
-        <button type="submit" id="submitBtn">Generate Google Form</button>
-    </form>
-    
-    <pre id="status">Ready to generate. Select a PDF file and click Generate.</pre>
+        <pre id="status">Ready to generate. Select a PDF file and click Generate.</pre>
+    </div>
 
     <script>
         const form = document.getElementById('f');
@@ -364,7 +390,7 @@ def form():
 @app.route('/api/pipeline', methods=['POST'])
 @require_auth
 def pipeline():
-    """Handle PDF → MCQs → Google Form pipeline"""
+    """Handle PDF → MCQs Google Form Generator pipeline"""
     FORMS_AUTH_METHOD = os.getenv('FORMS_AUTH_METHOD', 'oauth')
     if FORMS_AUTH_METHOD == 'sa':
         save_env_to_json('CLIENT_SECRET', 'client_secret.json')
@@ -590,6 +616,12 @@ def index():
         return redirect(url_for('form'))
     else:
         return redirect(url_for('login'))
+
+@app.route('/BG.webp')
+def bg_image():
+    """Serve the background image from project root."""
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    return send_from_directory(root_dir, 'BG.webp')
 
 if __name__ == "__main__":
     # Get port from environment variable (Cloud Run) or default to 5050 for local dev

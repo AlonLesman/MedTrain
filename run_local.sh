@@ -61,4 +61,4 @@ echo "🛑 Press Ctrl+C to stop the server"
 echo "=" * 60
 
 
-python3 start_local_web_interface.py
+python3 start_local_web_interface.py --debug --no-reloader
