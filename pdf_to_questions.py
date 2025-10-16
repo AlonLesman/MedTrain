@@ -177,6 +177,7 @@ Content guardrails:
 - Prefer single-best-answer MCQs.
 - Options must be mutually exclusive and collectively plausible.
 - Avoid ambiguous wording, double negatives, or local jargon without context.
+- Avoid exposing the answer in the question or the options.
 - Do not include sensitive PII.
 
 Here is the source text to base your questions on:
