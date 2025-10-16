@@ -321,6 +321,51 @@ def create_form_from_json(json_path: str, auth_method: str = "oauth", sa_file: O
             traceback.print_exc()
         raise
 
+    # Ensure target folder exists and move the form into it
+    try:
+        target_folder_name = (os.getenv("FORMS_TARGET_FOLDER_NAME") or "Medtrain Quizes").strip()
+        if target_folder_name:
+            log(f"Ensuring Drive folder exists: '{target_folder_name}'", "info")
+            drive_service = build("drive", "v3", credentials=creds)
+
+            # Find folder by name
+            folder_id = None
+            # Escape any single quotes in the folder name for Drive query syntax
+            escaped_name = target_folder_name.replace("'", "\\'")
+            query = f"mimeType='application/vnd.google-apps.folder' and name='{escaped_name}' and trashed=false"
+            search = drive_service.files().list(q=query, fields="files(id, name)", pageSize=1).execute()
+            files = search.get("files", [])
+            if files:
+                folder_id = files[0]["id"]
+                log(f"Found existing folder: {target_folder_name} ({folder_id})", "info")
+            else:
+                # Create folder
+                log(f"Folder not found. Creating: {target_folder_name}", "info")
+                new_folder = drive_service.files().create(
+                    body={
+                        "name": target_folder_name,
+                        "mimeType": "application/vnd.google-apps.folder",
+                    },
+                    fields="id, name"
+                ).execute()
+                folder_id = new_folder["id"]
+                log(f"Created folder: {target_folder_name} ({folder_id})", "info")
+
+            # Move form file into the folder (update parents)
+            meta = drive_service.files().get(fileId=form_id, fields="parents").execute()
+            previous_parents = ",".join(meta.get("parents", [])) if meta.get("parents") else ""
+            drive_service.files().update(
+                fileId=form_id,
+                addParents=folder_id,
+                removeParents=previous_parents,
+                fields="id, parents"
+            ).execute()
+            log(f"✅ Moved form {form_id} into folder {target_folder_name}", "info")
+    except Exception as e:
+        log(f"⚠️  Failed to place form in target folder: {e}", "warning")
+        if should_show_detailed_logs():
+            traceback.print_exc()
+
     # Ensure the form is a quiz before setting grading
     try:
         quiz_toggle = {
