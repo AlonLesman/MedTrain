@@ -12,6 +12,7 @@ import logging
 import json
 import traceback
 from dotenv import load_dotenv, find_dotenv
+import io
 
 # For Google Drive API sharing
 from googleapiclient.discovery import build
@@ -274,6 +275,14 @@ FORM_TEMPLATE = '''
         </form>
         
         <pre id="status">Ready to generate. Select a PDF file and click Generate.</pre>
+
+        <hr style="margin:24px 0; border:none; border-top:1px solid #ddd;" />
+        <div class="form-group">
+            <label for="rotate_link">Paste the current quiz Google Form link (response link, not the edit link):</label>
+            <input id="rotate_link" type="url" placeholder="https://docs.google.com/forms/d/e/…/viewform">
+            <small>Paste the Form response link, not the edit link.</small>
+        </div>
+        <button type="button" onclick="setCurrentFormLink()">Set as current quiz</button>
     </div>
 
     <script>
@@ -332,6 +341,36 @@ FORM_TEMPLATE = '''
                 submitBtn.textContent = 'Generate Google Form';
             }
         });
+
+        // Admin: Set current quiz link
+        async function setCurrentFormLink() {
+            const link = (document.getElementById('rotate_link').value || '').trim();
+            if (!link) {
+                status.textContent = 'Please paste a Google Form link.';
+                status.className = 'error';
+                return;
+            }
+            try {
+                status.textContent = 'Updating current quiz link…';
+                status.className = 'loading';
+                const res = await fetch('/api/set_current_form', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ form_url: link })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    status.textContent = '✅ Current quiz link updated: ' + data.active_form_url;
+                    status.className = 'success';
+                } else {
+                    status.textContent = 'Error updating current quiz link: ' + (data.error || res.statusText);
+                    status.className = 'error';
+                }
+            } catch (err) {
+                status.textContent = 'Network Error: ' + err.message;
+                status.className = 'error';
+            }
+        }
     </script>
 </body>
 </html>
@@ -358,6 +397,50 @@ def require_auth(f):
         return f(*args, **kwargs)
     decorated_function.__name__ = f.__name__
     return decorated_function
+
+# Atomic JSON writer for current form link persistence. We do NOT use env vars
+# for this because environment variables are read-only at runtime on many
+# platforms (e.g., Cloud Run). We persist the active link in a JSON file.
+def _atomic_write_json(target_path: str, data: dict):
+    directory = os.path.dirname(target_path)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_current_form_", dir=directory)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as tmpf:
+            json.dump(data, tmpf, ensure_ascii=False, indent=2)
+            tmpf.flush()
+            os.fsync(tmpf.fileno())
+        os.replace(tmp_path, target_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+def _resolve_current_form_json_path() -> str:
+    """Resolve a writable path for current_form.json with no env vars required.
+    Order:
+      1) /secrets if it exists and is writable
+      2) /tmp (Cloud Run writable tmpfs)
+      3) Project directory (local dev)
+    """
+    secrets_dir = '/secrets'
+    try:
+        if os.path.isdir(secrets_dir) and os.access(secrets_dir, os.W_OK):
+            return os.path.join(secrets_dir, 'current_form.json')
+    except Exception:
+        pass
+    # Prefer /tmp for Cloud Run runtime writes
+    try:
+        if os.path.isdir('/tmp') and os.access('/tmp', os.W_OK):
+            return os.path.join('/tmp', 'current_form.json')
+    except Exception:
+        pass
+    # Fallback to project directory for local dev
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(project_dir, 'current_form.json')
 
 # Authentication routes
 @app.route('/login', methods=['GET', 'POST'])
@@ -596,6 +679,44 @@ def pipeline():
             "success": False, 
             "error": f"Server error: {str(e)}"
         }), 500
+
+@app.route('/api/set_current_form', methods=['POST'])
+@require_auth
+def set_current_form():
+    """Set the current active Google Form (response link) atomically in JSON.
+    Persists to /secrets/current_form.json under key "active_form_url".
+    """
+    try:
+        if not request.is_json:
+            return jsonify({"success": False, "error": "Expected JSON body"}), 400
+        payload = request.get_json(silent=True) or {}
+        form_url = (payload.get('form_url') or '').strip()
+        if not form_url:
+            return jsonify({"success": False, "error": "form_url is required"}), 400
+
+        target_path = _resolve_current_form_json_path()
+        _atomic_write_json(target_path, {"active_form_url": form_url})
+        return jsonify({"success": True, "active_form_url": form_url})
+    except Exception as e:
+        logger.error(f"set_current_form error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/current-form', methods=['GET'])
+def current_form_redirect():
+    """Redirect to the currently active Google Form. 404 if not set."""
+    try:
+        target_path = _resolve_current_form_json_path()
+        if not os.path.exists(target_path):
+            return jsonify({"success": False, "error": "No active form set"}), 404
+        with open(target_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        url = (data.get('active_form_url') or '').strip()
+        if not url:
+            return jsonify({"success": False, "error": "No active form set"}), 404
+        return redirect(url)
+    except Exception as e:
+        logger.error(f"current_form_redirect error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
