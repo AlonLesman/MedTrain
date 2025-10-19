@@ -2,7 +2,7 @@
 
 ### Introduction
 
-**Medtrain** is a web application designed to facilitate medical training through interactive forms and workflows. It allows users to create, access, and manage training pipelines securely. The application supports multiple authentication modes and can be run locally or deployed on Google Cloud for scalable access.
+**Medtrain** is a web application built to enhance medical education through interactive quizzes and streamlined workflows. It enables users to securely create, access, and manage training pipelines. Specifically, the app converts a “takeaways document” into an automatically generated Google Form quiz based on its key points—helping ensure that the intended audience thoroughly reads and engages with the material. The application supports multiple authentication modes and can run locally or be deployed in Service Account (SA) mode on Google Cloud for scalable, secure access.
 
 ---
 
