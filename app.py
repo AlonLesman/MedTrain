@@ -171,6 +171,9 @@ FORM_TEMPLATE = '''
             border-radius: 4px;
             text-decoration: none;
             font-size: 14px;
+            position: absolute;
+            top: 20px;
+            right: 20px;
         }
         .logout-btn:hover {
             background: #c82333;
@@ -237,24 +240,25 @@ FORM_TEMPLATE = '''
 <body>
     <div class="overlay"></div>
     <div class="form-container">
-        <h1>
-            PDF → MCQs Google Form Generator
-            <a href="/logout" class="logout-btn">Logout</a>
-        </h1>
+        <a href="/logout" class="logout-btn">Logout</a>
+        <h2>
+            Takeaways Doc PDF → MCQs Google Form Generator
+        </h2>
         
         <form id="f">
             <div class="form-group">
-                <label for="pdf">PDF File:</label>
+                <label for="pdf">Upload Takeaways Document PDF:</label>
                 <input id="pdf" type="file" accept="application/pdf" required>
+                <small style="color:#d32f2f; display:block; margin-top:4px; font-weight:500;">⚠️ Do not upload any confidential information.</small>
             </div>
             
             <div class="form-group">
-                <label for="count">Number of Questions:</label>
+                <label for="count">Choose the number of questions you want to generate:</label>
                 <input id="count" type="number" min="1" max="20" value="6">
             </div>
             
             <div class="form-group">
-                <label for="lang">Language:</label>
+                <label for="lang">Choose the language of the questions:</label>
                 <select id="lang">
                     <option value="en" selected>English</option>
                     <option value="he">Hebrew</option>
@@ -262,7 +266,7 @@ FORM_TEMPLATE = '''
             </div>
             
             <div class="form-group">
-                <label for="share_with">Share with (email, optional):</label>
+                <label for="share_with">In order to get editor access to the Google Form, please enter your email here:</label>
                 <input id="share_with" type="email" placeholder="you@example.com">
             </div>
             
