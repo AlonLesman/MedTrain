@@ -362,6 +362,9 @@ FORM_TEMPLATE = '''
                 if (res.ok && data.success) {
                     status.textContent = '✅ Current quiz link updated: ' + data.active_form_url;
                     status.className = 'success';
+                    const respDiv = document.createElement('div');
+                    respDiv.innerHTML = `<br><strong>Responses link:</strong> <a href="/current-responses" target="_blank">Open latest responses</a>`;
+                    status.appendChild(respDiv);
                 } else {
                     status.textContent = 'Error updating current quiz link: ' + (data.error || res.statusText);
                     status.className = 'error';
@@ -694,9 +697,22 @@ def set_current_form():
         if not form_url:
             return jsonify({"success": False, "error": "form_url is required"}), 400
 
+        # Compute responses URL based on the provided form_url
+        if form_url.endswith("/viewform"):
+            responses_url = form_url.replace("/viewform", "/edit#responses")
+        else:
+            responses_url = form_url + "#responses"
+
         target_path = _resolve_current_form_json_path()
-        _atomic_write_json(target_path, {"active_form_url": form_url})
-        return jsonify({"success": True, "active_form_url": form_url})
+        _atomic_write_json(target_path, {
+            "active_form_url": form_url,
+            "active_responses_url": responses_url
+        })
+        return jsonify({
+            "success": True,
+            "active_form_url": form_url,
+            "active_responses_url": responses_url
+        })
     except Exception as e:
         logger.error(f"set_current_form error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -716,6 +732,23 @@ def current_form_redirect():
         return redirect(url)
     except Exception as e:
         logger.error(f"current_form_redirect error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/current-responses', methods=['GET'])
+def current_responses_redirect():
+    """Redirect to the current active form's responses page."""
+    try:
+        target_path = _resolve_current_form_json_path()
+        if not os.path.exists(target_path):
+            return jsonify({"success": False, "error": "No active form set"}), 404
+        with open(target_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        url = (data.get('active_responses_url') or '').strip()
+        if not url:
+            return jsonify({"success": False, "error": "No active responses link set"}), 404
+        return redirect(url)
+    except Exception as e:
+        logger.error(f"current_responses_redirect error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])

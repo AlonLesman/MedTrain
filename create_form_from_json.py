@@ -309,12 +309,36 @@ def create_form_from_json(json_path: str, auth_method: str = "oauth", sa_file: O
     log("Creating empty Google Form...", "info")
     try:
         form = forms_service.forms().create(body={
-            "info": {"title": "Mission Quiz", "documentTitle": "MCQ Quiz"}
+            "info": {"title": "Mission Quiz", "documentTitle": "MCQ Quiz"},
         }).execute()
         form_id = form["formId"]
         log(f"✅ Form created successfully with ID: {form_id}", "info")
         if should_show_api_logs():
             log(f"Form creation API response: {form}", "debug")
+        # Insert required "What's your name?" question at the top
+        try:
+            name_question_request = {
+                "requests": [
+                    {
+                        "createItem": {
+                            "item": {
+                                "title": "What’s your name? / מה שמך?",
+                                "questionItem": {
+                                    "question": {
+                                        "required": True,
+                                        "textQuestion": {"paragraph": False}
+                                    }
+                                }
+                            },
+                            "location": {"index": 0}
+                        }
+                    }
+                ]
+            }
+            forms_service.forms().batchUpdate(formId=form_id, body=name_question_request).execute()
+            log("✅ Added required 'What’s your name?' text question at top of form", "info")
+        except Exception as e:
+            log(f"⚠️ Failed to add name question: {e}", "warning")
     except Exception as e:
         log(f"❌ Failed to create form: {e}", "error")
         if should_show_detailed_logs():
@@ -447,7 +471,7 @@ def create_form_from_json(json_path: str, auth_method: str = "oauth", sa_file: O
                             }
                         }
                     },
-                    "location": {"index": 0}
+                    "location": {"index": 1}
                 }
             })
 
@@ -471,7 +495,7 @@ def create_form_from_json(json_path: str, auth_method: str = "oauth", sa_file: O
                             }
                         }
                     },
-                    "location": {"index": 0},
+                    "location": {"index": 1},
                     "updateMask": "questionItem.question.grading"
                 }
             })
