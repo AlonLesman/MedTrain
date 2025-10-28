@@ -236,6 +236,32 @@ FORM_TEMPLATE = '''
         .loading {
             color: #1976d2;
         }
+        .actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-top: 16px;
+        }
+        /* Ensure both buttons have identical size */
+        button, .link-btn {
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            line-height: 1.2;
+            min-height: 44px;
+            box-sizing: border-box;
+        }
+        .link-btn {
+            display: inline-block;
+            background: #6c757d;
+            color: #fff;
+            text-decoration: none;
+            /* sizing handled by shared rule above */
+        }
+        .link-btn:hover {
+            background: #5a6268;
+        }
     </style>
 </head>
 <body>
@@ -282,7 +308,10 @@ FORM_TEMPLATE = '''
             <input id="rotate_link" type="url" placeholder="https://docs.google.com/forms/d/e/…/viewform">
             <small>Paste the Form response link, not the edit link.</small>
         </div>
-        <button type="button" onclick="setCurrentFormLink()">Set as current quiz</button>
+        <div class="actions">
+            <button type="button" onclick="setCurrentFormLink()">Set as current quiz</button>
+            <a href="/current-responses" target="_blank" class="link-btn">Latest quiz responses</a>
+        </div>
     </div>
 
     <script>
