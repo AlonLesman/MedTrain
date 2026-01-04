@@ -2,7 +2,17 @@
 
 ### Introduction
 
-**Medtrain** is a web application built to enhance medical education through interactive quizzes and streamlined workflows. It enables users to securely create, access, and manage training pipelines. Specifically, the app converts a “takeaways document” into an automatically generated Google Form quiz based on its key points—helping ensure that the intended audience thoroughly reads and engages with the material. The application supports multiple authentication modes and can run locally or be deployed in Service Account (SA) mode on Google Cloud for scalable, secure access.
+**MedTrain** is an educational application designed to help users generate quizzes and Google Forms from uploaded documents, improving comprehension and engagement with learning materials.
+
+The product is available in two interfaces:
+- **Web Application** – users upload a document via a secure web interface and receive an automatically generated quiz.
+- **WhatsApp Bot** – users initiate a conversation on WhatsApp and voluntarily send a document to receive a generated quiz or form.
+
+MedTrain operates **only on user-initiated requests**. Users must actively contact the service and submit a document. The system does **not** send marketing messages, bulk messages, or unsolicited communications, and does not initiate conversations with users.
+
+The application can run locally or be deployed on Google Cloud using a Google Service Account for secure, scalable access to Google Forms.
+
+**Contact:** alonlesman@gmail.com
 
 ---
 

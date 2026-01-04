@@ -14,6 +14,19 @@ import traceback
 from dotenv import load_dotenv, find_dotenv
 import io
 
+import requests
+import hmac
+import hashlib
+from urllib.parse import urlparse
+
+# Optional: Twilio (for WhatsApp via Twilio)
+try:
+    from twilio.request_validator import RequestValidator
+    from twilio.rest import Client as TwilioClient
+except Exception:
+    RequestValidator = None
+    TwilioClient = None
+
 # For Google Drive API sharing
 from googleapiclient.discovery import build
 
@@ -430,6 +443,174 @@ def require_auth(f):
     decorated_function.__name__ = f.__name__
     return decorated_function
 
+# -----------------------------
+# WhatsApp Bot Helpers
+# -----------------------------
+
+def _parse_allowlist() -> set:
+    raw = (os.getenv('WHATSAPP_ALLOWLIST') or '').strip()
+    if not raw:
+        return set()
+    # Accept formats like: "+972501234567,+972..." or "whatsapp:+972..."
+    parts = [p.strip() for p in raw.split(',') if p.strip()]
+    return set(parts)
+
+
+def _is_allowed_sender(sender: str) -> bool:
+    allow = _parse_allowlist()
+    if not allow:
+        # If no allowlist is configured, default-deny for safety
+        return False
+    if sender in allow:
+        return True
+    # Normalize Twilio WhatsApp sender format: "whatsapp:+972..."
+    if sender.startswith('whatsapp:'):
+        s2 = sender.replace('whatsapp:', '', 1)
+        return s2 in allow
+    return False
+
+
+def _download_to_tmp(url: str, dst_path: str, headers: dict | None = None) -> None:
+    headers = headers or {}
+    with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        with open(dst_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+
+def _run_pipeline_on_pdf_path(
+    pdf_path: str,
+    *,
+    num_questions: int,
+    language: str,
+    model: str,
+    share_with: str | None,
+    tmpdir: str,
+) -> dict:
+    """Run the existing pipeline given a PDF on disk.
+
+    Returns the same structure you return from /api/pipeline (where possible).
+    """
+    FORMS_AUTH_METHOD = os.getenv('FORMS_AUTH_METHOD', 'oauth')
+    if FORMS_AUTH_METHOD == 'sa':
+        # ensure service account json exists if you use that mode
+        save_env_to_json('CLIENT_SECRET', 'client_secret.json')
+
+    logger.info(f"Starting pipeline (bot/web): PDF={os.path.basename(pdf_path)}, questions={num_questions}, language={language}")
+
+    # Step 1: PDF → MCQs JSON
+    mcqs_json_path = generate_mcqs_to_file(
+        pdf_path=pdf_path,
+        output_dir=tmpdir,
+        model=model,
+        num_questions=num_questions,
+        language=language,
+    )
+
+    # Safety check / truncation
+    try:
+        with open(mcqs_json_path, 'r', encoding='utf-8') as f:
+            mcqs_data = json.load(f)
+        questions = mcqs_data.get('questions', [])
+        if not questions:
+            raise ValueError('No questions generated from PDF')
+        if len(questions) > num_questions:
+            mcqs_data['questions'] = questions[:num_questions]
+            with open(mcqs_json_path, 'w', encoding='utf-8') as f:
+                json.dump(mcqs_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Question validation failed: {e}")
+
+    # Step 2: JSON → Google Form
+    form_edit_url = create_form_from_json(
+        json_path=mcqs_json_path,
+        auth_method=FORMS_AUTH_METHOD,
+        sa_file=os.getenv('SA_FILE'),
+        share_with=share_with if share_with else None,
+    )
+
+    # Step 3: (optional) share via Drive permissions (same logic as /api/pipeline)
+    share_success = None
+    drive_share_error = None
+    if form_edit_url and share_with:
+        import re
+        m = re.search(r'/d/([a-zA-Z0-9_-]+)', form_edit_url)
+        file_id = m.group(1) if m else None
+        if file_id:
+            try:
+                creds = None
+                if FORMS_AUTH_METHOD == 'sa':
+                    from google.oauth2 import service_account
+                    sa_file = os.getenv('SA_FILE') or 'client_secret.json'
+                    creds = service_account.Credentials.from_service_account_file(
+                        sa_file,
+                        scopes=[
+                            'https://www.googleapis.com/auth/drive',
+                            'https://www.googleapis.com/auth/forms.body',
+                            'https://www.googleapis.com/auth/forms.responses.readonly',
+                        ],
+                    )
+                else:
+                    import pickle
+                    token_path = os.getenv('TOKEN_PATH') or '/secrets/token.pkl'
+                    with open(token_path, 'rb') as token:
+                        creds = pickle.load(token)
+
+                drive_service = build('drive', 'v3', credentials=creds)
+                permission = {'type': 'user', 'role': 'writer', 'emailAddress': share_with}
+                drive_service.permissions().create(
+                    fileId=file_id,
+                    body=permission,
+                    sendNotificationEmail=False,
+                ).execute()
+                share_success = True
+            except Exception as e:
+                share_success = False
+                drive_share_error = str(e)
+
+    return {
+        'success': True,
+        'mcqs_json_path': mcqs_json_path,
+        'form_edit_url': form_edit_url,
+        'pdf_filename': os.path.basename(pdf_path),
+        'num_questions': num_questions,
+        'language': language,
+        'model': model,
+        'shared_with': share_with if share_with else None,
+        'share_success': share_success,
+        'drive_share_error': drive_share_error,
+    }
+
+
+def _twilio_send_message(to_number: str, body: str) -> None:
+    """Send a WhatsApp message via Twilio."""
+    if TwilioClient is None:
+        raise RuntimeError('Twilio SDK not installed. pip install twilio')
+    sid = os.getenv('TWILIO_ACCOUNT_SID')
+    token = os.getenv('TWILIO_AUTH_TOKEN')
+    from_number = os.getenv('TWILIO_WHATSAPP_FROM')  # e.g. "whatsapp:+14155238886" or your approved number
+    if not (sid and token and from_number):
+        raise RuntimeError('Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM env vars')
+    client = TwilioClient(sid, token)
+    client.messages.create(from_=from_number, to=to_number, body=body)
+
+
+def _twilio_validate_request(req) -> bool:
+    """Validate Twilio webhook signature (recommended for production)."""
+    if RequestValidator is None:
+        # If SDK missing, do not silently accept in production.
+        return False
+    auth_token = os.getenv('TWILIO_AUTH_TOKEN') or ''
+    signature = req.headers.get('X-Twilio-Signature', '')
+    # Build the full URL Twilio used (Cloud Run behind proxy may need X-Forwarded-Proto)
+    proto = req.headers.get('X-Forwarded-Proto', req.scheme)
+    host = req.headers.get('X-Forwarded-Host', req.host)
+    url = f"{proto}://{host}{req.path}"
+    validator = RequestValidator(auth_token)
+    return validator.validate(url, req.form.to_dict(flat=True), signature)
+
 # Atomic JSON writer for current form link persistence. We do NOT use env vars
 # for this because environment variables are read-only at runtime on many
 # platforms (e.g., Cloud Run). We persist the active link in a JSON file.
@@ -517,19 +698,19 @@ def pipeline():
         # Validate required fields
         if 'pdf' not in request.files:
             return jsonify({"success": False, "error": "Missing file 'pdf'"}), 400
-        
+
         f = request.files['pdf']
         if f.filename == '':
             return jsonify({"success": False, "error": "No file selected"}), 400
-        
+
         # Store filename early to avoid issues later
         pdf_filename = f.filename
-        
+
         # Get form parameters with validation
         language = _get_language()
         num_questions = _get_num_questions()
         model = request.form.get('model', 'gpt-4.1').strip()
-        
+
         # Debug breadcrumbs
         print(json.dumps({
             "evt": "pipeline.inputs",
@@ -540,162 +721,42 @@ def pipeline():
             "token_exists": os.path.exists("/secrets/token.pkl"),
             "key_present": bool(os.getenv("OPENAI_API_KEY")),
         }), flush=True)
-        
+
         logger.info(f"Starting pipeline: PDF={pdf_filename}, questions={num_questions}, language={language}")
-        
+
         # Create temporary directory for processing (use /tmp for Cloud Run)
         tmpdir = tempfile.mkdtemp(prefix="medtrain_", dir="/tmp")
         pdf_path = os.path.join(tmpdir, pdf_filename)
-        
+
         try:
             # Save uploaded PDF
             f.save(pdf_path)
             logger.info(f"PDF saved to: {pdf_path}")
-            
-            # Step 1: PDF → MCQs JSON
-            logger.info("Step 1: Generating MCQs from PDF...")
-            mcqs_json_path = generate_mcqs_to_file(
-                pdf_path=pdf_path, 
-                output_dir=tmpdir,
-                model=model, 
-                num_questions=num_questions,
-                language=language
-            )
-            logger.info(f"MCQs JSON generated: {mcqs_json_path}")
-            
-            # Safety check: Ensure we don't exceed the requested number of questions
-            try:
-                with open(mcqs_json_path, 'r', encoding='utf-8') as f:
-                    mcqs_data = json.load(f)
-                
-                questions = mcqs_data.get('questions', [])
-                logger.info(f"📊 Found {len(questions)} questions in generated JSON")
-                
-                if len(questions) == 0:
-                    logger.error(f"❌ No questions found in generated JSON!")
-                    logger.error(f"📄 JSON content: {json.dumps(mcqs_data, indent=2)[:500]}...")
-                    return jsonify({
-                        "success": False,
-                        "error": "No questions generated from PDF. Please check the PDF content and try again.",
-                        "req_id": getattr(g, "req_id", None)
-                    }), 400
-                
-                if len(questions) > num_questions:
-                    logger.warning(f"⚠️ Generated {len(questions)} questions, truncating to {num_questions}")
-                    mcqs_data['questions'] = questions[:num_questions]
-                    
-                    # Save the truncated version
-                    with open(mcqs_json_path, 'w', encoding='utf-8') as f:
-                        json.dump(mcqs_data, f, ensure_ascii=False, indent=2)
-                        
-            except Exception as e:
-                logger.error(f"❌ Could not validate question count: {e}")
-                logger.error(f"📄 Validation error traceback: {traceback.format_exc()}")
-            
-            logger.info(f"Requested language: {language}")
-            
-            # Step 2: JSON → Google Form
-            logger.info("Step 2: Creating Google Form from MCQs JSON...")
-            try:
-                share_with = (request.form.get('share_with') or '').strip()
-                if not share_with:
-                    share_with = (os.getenv('SHARE_WITH') or '').strip()
-                form_edit_url = create_form_from_json(
-                    json_path=mcqs_json_path,
-                    auth_method=FORMS_AUTH_METHOD,
-                    sa_file=os.getenv('SA_FILE'),
-                    share_with=share_with if share_with else None
-                )
-                if form_edit_url:
-                    logger.info(f"✅ Google Form created successfully: {form_edit_url}")
-                else:
-                    logger.error(f"❌ Google Form creation failed: No URL returned")
-            except Exception as e:
-                logger.error(f"❌ Google Form creation failed with exception: {e}")
-                logger.error(f"📄 Google Form error traceback: {traceback.format_exc()}")
-                form_edit_url = None
 
-            # Step 3: Share Google Form if requested
-            share_success = None
-            drive_share_error = None
-            drive_response = None
-            file_id = None
-            if form_edit_url and share_with:
-                # Try to extract the file ID from the form_edit_url
-                import re
-                m = re.search(r'/d/([a-zA-Z0-9_-]+)', form_edit_url)
-                if m:
-                    file_id = m.group(1)
-                    logger.info(f"Extracted Google Form file ID: {file_id}")
-                else:
-                    logger.error(f"Could not extract file ID from form_edit_url: {form_edit_url}")
-                if file_id:
-                    try:
-                        # Reuse credentials from the Forms flow if possible
-                        creds = None
-                        if FORMS_AUTH_METHOD == 'sa':
-                            # Use service account credentials
-                            from google.oauth2 import service_account
-                            sa_file = os.getenv('SA_FILE') or 'client_secret.json'
-                            creds = service_account.Credentials.from_service_account_file(
-                                sa_file,
-                                scopes=[
-                                    'https://www.googleapis.com/auth/drive',
-                                    'https://www.googleapis.com/auth/forms.body',
-                                    'https://www.googleapis.com/auth/forms.responses.readonly'
-                                ]
-                            )
-                        else:
-                            # Use pickled OAuth user credentials (token.pkl)
-                            import pickle
-                            token_path = os.getenv('TOKEN_PATH') or '/secrets/token.pkl'
-                            with open(token_path, 'rb') as token:
-                                creds = pickle.load(token)
-                        drive_service = build('drive', 'v3', credentials=creds)
-                        permission = {
-                            'type': 'user',
-                            'role': 'writer',
-                            'emailAddress': share_with
-                        }
-                        drive_response = drive_service.permissions().create(
-                            fileId=file_id,
-                            body=permission,
-                            sendNotificationEmail=False
-                        ).execute()
-                        import json as _jsonmod
-                        logger.info(f"Drive API response: {_jsonmod.dumps(drive_response, indent=2)}")
-                        logger.info(f"✅ Shared Google Form with {share_with} via Drive API")
-                        share_success = True
-                    except Exception as e:
-                        logger.error(f"❌ Failed to share Google Form with {share_with}: {e}")
-                        logger.error(f"Drive API error traceback: {traceback.format_exc()}")
-                        share_success = False
-                        drive_share_error = str(e)
-            
-            # Return success response
-            response_data = {
-                "success": True,
-                "mcqs_json_path": mcqs_json_path,
-                "form_edit_url": form_edit_url,
-                "pdf_filename": pdf_filename,
-                "num_questions": num_questions,
-                "language": language,
-                "model": model,
-                "shared_with": share_with if share_with else None,
-                "share_success": share_success,
-                "drive_share_error": drive_share_error
-            }
+            # Run core pipeline
+            share_with = (request.form.get('share_with') or '').strip()
+            if not share_with:
+                share_with = (os.getenv('SHARE_WITH') or '').strip()
+
+            result = _run_pipeline_on_pdf_path(
+                pdf_path,
+                num_questions=num_questions,
+                language=language,
+                model=model,
+                share_with=share_with if share_with else None,
+                tmpdir=tmpdir,
+            )
 
             logger.info("Pipeline completed successfully")
-            return jsonify(response_data)
-            
+            return jsonify(result)
+
         except Exception as e:
             logger.error(f"Pipeline error: {str(e)}")
             return jsonify({
-                "success": False, 
+                "success": False,
                 "error": f"Pipeline failed: {str(e)}"
             }), 500
-            
+
         finally:
             # Clean up temporary files (optional - you might want to keep them for debugging)
             try:
@@ -704,11 +765,11 @@ def pipeline():
                 logger.info("Temporary files cleaned up")
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary files: {e}")
-                
+
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
         return jsonify({
-            "success": False, 
+            "success": False,
             "error": f"Server error: {str(e)}"
         }), 500
 
@@ -819,3 +880,129 @@ if __name__ == "__main__":
     logger.info(f"Open http://{host}:{port} in your browser")
     logger.info("Login with password: changeme (or set PIPELINE_PASSWORD in .env)")
     app.run(host=host, port=port, debug=True)
+
+@app.route('/whatsapp/twilio', methods=['POST'])
+def whatsapp_twilio_inbound():
+    """Twilio → WhatsApp inbound webhook.
+
+    Usage:
+      - Send a PDF as media to generate a new quiz form.
+      - Send: "set <google-form-response-link>" to update the current quiz link (admin action).
+
+    Security:
+      - Requires WHATSAPP_ALLOWLIST to contain the sender number.
+      - Validates X-Twilio-Signature when Twilio SDK is available.
+    """
+    # Signature validation (recommended). If SDK missing, reject.
+    if not _twilio_validate_request(request):
+        return ("invalid signature", 403)
+
+    sender = (request.form.get('From') or '').strip()  # e.g. "whatsapp:+972..."
+    body = (request.form.get('Body') or '').strip()
+    num_media = int(request.form.get('NumMedia') or '0')
+
+    if not _is_allowed_sender(sender):
+        try:
+            _twilio_send_message(sender, "Sorry, this number is not authorized to use this bot.")
+        except Exception:
+            pass
+        return ("forbidden", 403)
+
+    # Admin command: set current form link
+    if body.lower().startswith('set '):
+        link = body[4:].strip()
+        if not link:
+            _twilio_send_message(sender, "Please send: set <Google Form response link>")
+            return ("ok", 200)
+        try:
+            # Reuse existing persistence helpers
+            if link.endswith('/viewform'):
+                responses_url = link.replace('/viewform', '/edit#responses')
+            else:
+                responses_url = link + '#responses'
+            target_path = _resolve_current_form_json_path()
+            _atomic_write_json(target_path, {
+                'active_form_url': link,
+                'active_responses_url': responses_url,
+            })
+            _twilio_send_message(sender, f"✅ Current quiz link updated. Responses: {request.url_root.rstrip('/')}/current-responses")
+        except Exception as e:
+            _twilio_send_message(sender, f"❌ Failed to update: {e}")
+        return ("ok", 200)
+
+    # PDF workflow
+    if num_media < 1:
+        _twilio_send_message(sender, "Send me a PDF and I'll generate a Google Form quiz. Optionally add text like: q=8 lang=en")
+        return ("ok", 200)
+
+    media_url = (request.form.get('MediaUrl0') or '').strip()
+    media_type = (request.form.get('MediaContentType0') or '').strip()
+
+    if 'pdf' not in media_type.lower() and not media_url.lower().endswith('.pdf'):
+        _twilio_send_message(sender, "Please attach a PDF file.")
+        return ("ok", 200)
+
+    # Parse optional parameters from body (very lightweight): q=<n> lang=<en|he>
+    q = None
+    lang = None
+    for token in body.split():
+        if token.lower().startswith('q='):
+            q = token.split('=', 1)[1]
+        if token.lower().startswith('lang='):
+            lang = token.split('=', 1)[1]
+
+    language = normalize_language(lang)
+    num_questions = clamp_num_questions(q, default=6)
+    model = (os.getenv('WHATSAPP_MODEL') or 'gpt-4.1').strip()
+    share_with = (os.getenv('WHATSAPP_SHARE_WITH') or os.getenv('SHARE_WITH') or '').strip() or None
+
+    _twilio_send_message(sender, "⏳ Got it. Processing your PDF now…")
+
+    tmpdir = tempfile.mkdtemp(prefix='medtrain_wa_', dir='/tmp')
+    pdf_path = os.path.join(tmpdir, 'input.pdf')
+
+    try:
+        # Twilio media URLs require basic auth (Account SID/Auth Token)
+        sid = os.getenv('TWILIO_ACCOUNT_SID')
+        token = os.getenv('TWILIO_AUTH_TOKEN')
+        if not (sid and token):
+            raise RuntimeError('Missing TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN for media download')
+
+        with requests.get(media_url, auth=(sid, token), stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(pdf_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        result = _run_pipeline_on_pdf_path(
+            pdf_path,
+            num_questions=num_questions,
+            language=language,
+            model=model,
+            share_with=share_with,
+            tmpdir=tmpdir,
+        )
+
+        form_url = (result.get('form_edit_url') or '').strip()
+        if form_url:
+            _twilio_send_message(sender, f"✅ Done! Here is your Google Form (edit link): {form_url}")
+        else:
+            _twilio_send_message(sender, "❌ Form creation failed (no URL returned). Check logs.")
+
+    except Exception as e:
+        logger.error(f"WhatsApp Twilio pipeline error: {e}")
+        logger.error(traceback.format_exc())
+        try:
+            _twilio_send_message(sender, f"❌ Failed: {e}")
+        except Exception:
+            pass
+
+    finally:
+        try:
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+        except Exception:
+            pass
+
+    return ("ok", 200)
