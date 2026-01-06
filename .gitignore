@@ -50,6 +50,3 @@ ENV/
 # --- Cloud / deployment ---
 .gcloudignore
 service_account.json
-# --- Notes ---
-# Keep this file updated to avoid committing secrets,
-# system-generated files, and build artifacts.
