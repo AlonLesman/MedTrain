@@ -38,15 +38,10 @@ wheels/
 .Python
 *$py.class
 .env.bak
-# --- Virtual environments ---
+
 venv/
 env/
 ENV/
-
-# --- IDE / project files ---
 .vscode/
-.idea/
-
-# --- Cloud / deployment ---
 .gcloudignore
 service_account.json
