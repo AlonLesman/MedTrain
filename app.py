@@ -479,6 +479,106 @@ def _download_to_tmp(url: str, dst_path: str, headers: dict | None = None) -> No
                 if chunk:
                     f.write(chunk)
 
+# -----------------------------
+# WhatsApp Bot Conversation State
+# -----------------------------
+
+_WA_SESSION_FILE = '/tmp/wa_sessions.json'
+
+
+def _wa_load_sessions() -> dict:
+    try:
+        if os.path.exists(_WA_SESSION_FILE):
+            with open(_WA_SESSION_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _wa_save_sessions(data: dict) -> None:
+    # Best-effort persistence. /tmp is writable on Cloud Run.
+    try:
+        _atomic_write_json(_WA_SESSION_FILE, data)
+    except Exception:
+        pass
+
+
+def _wa_get(sender: str) -> dict:
+    sessions = _wa_load_sessions()
+    return sessions.get(sender) or {}
+
+
+def _wa_set(sender: str, state: dict) -> None:
+    sessions = _wa_load_sessions()
+    sessions[sender] = state
+    _wa_save_sessions(sessions)
+
+
+def _wa_clear(sender: str) -> None:
+    sessions = _wa_load_sessions()
+    if sender in sessions:
+        sessions.pop(sender, None)
+        _wa_save_sessions(sessions)
+
+
+def _wa_reset(sender: str) -> None:
+    # Start a fresh conversation
+    _wa_set(sender, {
+        'step': 'WAIT_PDF',
+        'pdf_path': None,
+        'tmpdir': None,
+        'num_questions': None,
+        'language': None,
+        'share_with': None,
+    })
+
+
+def _is_valid_email(email: str) -> bool:
+    email = (email or '').strip()
+    if not email:
+        return False
+    # Simple practical validation
+    import re
+    return re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', email) is not None
+
+
+def _parse_int_only(text: str) -> int | None:
+    t = (text or '').strip()
+    if not t:
+        return None
+    if not t.isdigit():
+        return None
+    try:
+        return int(t)
+    except Exception:
+        return None
+
+
+def _normalize_lang_choice(text: str) -> str | None:
+    t = (text or '').strip().lower()
+    if not t:
+        return None
+    # Accept numeric and textual options
+    if t in ('1', 'english', 'en', 'angielski', 'ang', 'אנגלית'):
+        return 'en'
+    if t in ('2', 'hebrew', 'he', 'עברית'):
+        return 'he'
+    return None
+
+
+def _derive_form_links(form_edit_url: str) -> dict:
+    """Best-effort derive view/respond/responses URLs from edit URL."""
+    edit = (form_edit_url or '').strip()
+    if not edit:
+        return {'edit': '', 'view': '', 'responses': ''}
+    base = edit
+    if '/edit' in edit:
+        base = edit.split('/edit', 1)[0]
+    view = base + '/viewform'
+    responses = base + '/edit#responses'
+    return {'edit': edit, 'view': view, 'responses': responses}
+
 
 def _run_pipeline_on_pdf_path(
     pdf_path: str,
@@ -885,13 +985,17 @@ if __name__ == "__main__":
 def whatsapp_twilio_inbound():
     """Twilio → WhatsApp inbound webhook.
 
-    Usage:
-      - Send a PDF as media to generate a new quiz form.
-      - Send: "set <google-form-response-link>" to update the current quiz link (admin action).
+    Conversation flow (stateful per sender, best-effort persisted in /tmp):
+      1) Any first message → ask for PDF
+      2) Receive valid PDF → ask for #questions (number only)
+      3) Receive valid number → ask for language (1=English, 2=Hebrew)
+      4) Receive language → ask for editor email (or 'skip')
+      5) Run pipeline → send edit/view/responses links
 
-    Security:
+    Notes:
       - Requires WHATSAPP_ALLOWLIST to contain the sender number.
       - Validates X-Twilio-Signature when Twilio SDK is available.
+      - This state store is best-effort; for strong reliability use Firestore/Redis.
     """
     # Signature validation (recommended). If SDK missing, reject.
     if not _twilio_validate_request(request):
@@ -901,21 +1005,27 @@ def whatsapp_twilio_inbound():
     body = (request.form.get('Body') or '').strip()
     num_media = int(request.form.get('NumMedia') or '0')
 
+    # Authorization
     if not _is_allowed_sender(sender):
         try:
-            _twilio_send_message(sender, "Sorry, this number is not authorized to use this bot.")
+            _twilio_send_message(sender, "מצטער, המספר הזה לא מורשה להשתמש בבוט.")
         except Exception:
             pass
         return ("forbidden", 403)
 
-    # Admin command: set current form link
+    # Global commands
+    if body.strip().lower() in ('cancel', 'reset', 'התחל מחדש', 'ביטול'):
+        _wa_reset(sender)
+        _twilio_send_message(sender, "התחלנו מחדש ✅\nשלח לי בבקשה את קובץ ה-PDF.")
+        return ("ok", 200)
+
+    # Admin command: set current form link (kept as-is)
     if body.lower().startswith('set '):
         link = body[4:].strip()
         if not link:
             _twilio_send_message(sender, "Please send: set <Google Form response link>")
             return ("ok", 200)
         try:
-            # Reuse existing persistence helpers
             if link.endswith('/viewform'):
                 responses_url = link.replace('/viewform', '/edit#responses')
             else:
@@ -930,79 +1040,185 @@ def whatsapp_twilio_inbound():
             _twilio_send_message(sender, f"❌ Failed to update: {e}")
         return ("ok", 200)
 
-    # PDF workflow
-    if num_media < 1:
-        _twilio_send_message(sender, "Send me a PDF and I'll generate a Google Form quiz. Optionally add text like: q=8 lang=en")
+    # Load or initialize session
+    st = _wa_get(sender)
+    if not st or not st.get('step'):
+        _wa_reset(sender)
+        _twilio_send_message(sender, "היי! 👋\nשלח לי בבקשה את קובץ ה-PDF של הדף/המסמך שממנו תרצה לייצר שאלון.")
         return ("ok", 200)
 
-    media_url = (request.form.get('MediaUrl0') or '').strip()
-    media_type = (request.form.get('MediaContentType0') or '').strip()
+    step = st.get('step')
 
-    if 'pdf' not in media_type.lower() and not media_url.lower().endswith('.pdf'):
-        _twilio_send_message(sender, "Please attach a PDF file.")
+    # Step 1: wait for PDF
+    if step == 'WAIT_PDF':
+        if num_media < 1:
+            _twilio_send_message(sender, "שלח לי בבקשה קובץ PDF כדי שאוכל להתחיל 🙂")
+            return ("ok", 200)
+
+        media_url = (request.form.get('MediaUrl0') or '').strip()
+        media_type = (request.form.get('MediaContentType0') or '').strip()
+
+        if 'pdf' not in media_type.lower() and not media_url.lower().endswith('.pdf'):
+            _twilio_send_message(sender, "נראה שלא שלחת PDF תקין. תוכל לשלוח שוב בבקשה קובץ PDF?")
+            return ("ok", 200)
+
+        # Download PDF
+        tmpdir = tempfile.mkdtemp(prefix='medtrain_wa_', dir='/tmp')
+        pdf_path = os.path.join(tmpdir, 'input.pdf')
+        try:
+            sid = os.getenv('TWILIO_ACCOUNT_SID')
+            token = os.getenv('TWILIO_AUTH_TOKEN')
+            if not (sid and token):
+                raise RuntimeError('Missing TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN for media download')
+            with requests.get(media_url, auth=(sid, token), stream=True, timeout=60) as r:
+                r.raise_for_status()
+                with open(pdf_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+        except Exception as e:
+            logger.error(f"WhatsApp download error: {e}")
+            logger.error(traceback.format_exc())
+            _twilio_send_message(sender, "הייתה בעיה להוריד את הקובץ. נסה שוב בבקשה.")
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+            except Exception:
+                pass
+            return ("ok", 200)
+
+        # Save state
+        st['step'] = 'WAIT_Q'
+        st['pdf_path'] = pdf_path
+        st['tmpdir'] = tmpdir
+        _wa_set(sender, st)
+
+        _twilio_send_message(sender, "תודה! ✅ קיבלתי את ה-PDF.\nכמה שאלות תרצה ליצור? (ענה במספר בלבד)")
         return ("ok", 200)
 
-    # Parse optional parameters from body (very lightweight): q=<n> lang=<en|he>
-    q = None
-    lang = None
-    for token in body.split():
-        if token.lower().startswith('q='):
-            q = token.split('=', 1)[1]
-        if token.lower().startswith('lang='):
-            lang = token.split('=', 1)[1]
+    # Step 2: number of questions
+    if step == 'WAIT_Q':
+        n = _parse_int_only(body)
+        if n is None:
+            _twilio_send_message(sender, "אנא ענה במספר בלבד (לדוגמה: 8).")
+            return ("ok", 200)
+        n = clamp_num_questions(str(n), default=6)
+        st['num_questions'] = n
+        st['step'] = 'WAIT_LANG'
+        _wa_set(sender, st)
+        _twilio_send_message(sender, "באיזו שפה תרצה שהשאלות יהיו?\nענה 1 לאנגלית או 2 לעברית.")
+        return ("ok", 200)
 
-    language = normalize_language(lang)
-    num_questions = clamp_num_questions(q, default=6)
-    model = (os.getenv('WHATSAPP_MODEL') or 'gpt-4.1').strip()
-    share_with = (os.getenv('WHATSAPP_SHARE_WITH') or os.getenv('SHARE_WITH') or '').strip() or None
+    # Step 3: language
+    if step == 'WAIT_LANG':
+        lang = _normalize_lang_choice(body)
+        if not lang:
+            _twilio_send_message(sender, "לא הצלחתי להבין. אנא ענה 1 (אנגלית) או 2 (עברית).")
+            return ("ok", 200)
+        st['language'] = normalize_language(lang)
+        st['step'] = 'WAIT_EMAIL'
+        _wa_set(sender, st)
+        _twilio_send_message(sender, "למי תרצה לתת הרשאת עריכה לשאלון שאני יוצר?\nענה עם כתובת אימייל תקינה (או כתוב 'skip' כדי לדלג).")
+        return ("ok", 200)
 
-    _twilio_send_message(sender, "⏳ Got it. Processing your PDF now…")
-
-    tmpdir = tempfile.mkdtemp(prefix='medtrain_wa_', dir='/tmp')
-    pdf_path = os.path.join(tmpdir, 'input.pdf')
-
-    try:
-        # Twilio media URLs require basic auth (Account SID/Auth Token)
-        sid = os.getenv('TWILIO_ACCOUNT_SID')
-        token = os.getenv('TWILIO_AUTH_TOKEN')
-        if not (sid and token):
-            raise RuntimeError('Missing TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN for media download')
-
-        with requests.get(media_url, auth=(sid, token), stream=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(pdf_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-
-        result = _run_pipeline_on_pdf_path(
-            pdf_path,
-            num_questions=num_questions,
-            language=language,
-            model=model,
-            share_with=share_with,
-            tmpdir=tmpdir,
-        )
-
-        form_url = (result.get('form_edit_url') or '').strip()
-        if form_url:
-            _twilio_send_message(sender, f"✅ Done! Here is your Google Form (edit link): {form_url}")
+    # Step 4: editor email
+    if step == 'WAIT_EMAIL':
+        if body.strip().lower() in ('skip', 'דלג', 'לא', 'none'):
+            st['share_with'] = None
         else:
-            _twilio_send_message(sender, "❌ Form creation failed (no URL returned). Check logs.")
+            if not _is_valid_email(body):
+                _twilio_send_message(sender, "נראה שכתובת האימייל לא תקינה. אנא שלח אימייל תקין (לדוגמה: you@example.com) או כתוב 'skip' כדי לדלג.")
+                return ("ok", 200)
+            st['share_with'] = body.strip()
 
-    except Exception as e:
-        logger.error(f"WhatsApp Twilio pipeline error: {e}")
-        logger.error(traceback.format_exc())
+        st['step'] = 'PROCESSING'
+        _wa_set(sender, st)
+
+        _twilio_send_message(sender, "מעולה ✅ תן לי להכין לך את השאלון… זה יכול לקחת כמה דקות.")
+
+        # Run pipeline
+        pdf_path = st.get('pdf_path')
+        tmpdir = st.get('tmpdir')
+        num_questions = st.get('num_questions') or 6
+        language = st.get('language') or 'en'
+        model = (os.getenv('WHATSAPP_MODEL') or 'gpt-4.1').strip()
+        share_with = st.get('share_with')
+
         try:
-            _twilio_send_message(sender, f"❌ Failed: {e}")
-        except Exception:
-            pass
+            if not pdf_path or not tmpdir or not os.path.exists(pdf_path):
+                raise RuntimeError('Missing PDF in session. Please send the PDF again.')
 
-    finally:
-        try:
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-        except Exception:
-            pass
+            result = _run_pipeline_on_pdf_path(
+                pdf_path,
+                num_questions=num_questions,
+                language=language,
+                model=model,
+                share_with=share_with,
+                tmpdir=tmpdir,
+            )
 
+            form_edit_url = (result.get('form_edit_url') or '').strip()
+            links = _derive_form_links(form_edit_url)
+
+            # ✅ Update the "current quiz" pointer so /current-form points to the latest quiz response link
+            try:
+                target_path = _resolve_current_form_json_path()
+                _atomic_write_json(target_path, {
+                    'active_form_url': links['view'],          # viewform (response link)
+                    'active_responses_url': links['responses'] # edit#responses
+                })
+            except Exception as e:
+                logger.error(f"Failed to update current form: {e}")
+
+            # ✅ Stable links (constant endpoints on your Cloud Run service)
+            stable_view_link = f"{request.url_root.rstrip('/')}/current-form"
+            stable_responses_link = f"{request.url_root.rstrip('/')}/current-responses"
+
+            if links['edit']:
+                msg = (
+                    "✅ סיימתי! הנה הקישורים:\n"
+                    f"1) קישור לעריכה: {links['edit']}\n"
+                    f"2) קישור למענה (קבוע): {stable_view_link}\n"
+                    f"3) צפייה בתשובות (קבוע): {stable_responses_link}"
+                )
+                _twilio_send_message(sender, msg)
+            else:
+                _twilio_send_message(sender, "❌ יצירת הטופס נכשלה (לא התקבל קישור). בדוק לוגים.")
+
+        except Exception as e:
+            logger.error(f"WhatsApp Twilio pipeline error: {e}")
+            logger.error(traceback.format_exc())
+            try:
+                _twilio_send_message(sender, f"❌ נכשל: {e}")
+            except Exception:
+                pass
+
+        finally:
+            # Cleanup
+            try:
+                if pdf_path and os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+            except Exception:
+                pass
+            try:
+                if tmpdir and os.path.isdir(tmpdir):
+                    # Best-effort: leave dir if deletion fails
+                    for fn in os.listdir(tmpdir):
+                        try:
+                            os.remove(os.path.join(tmpdir, fn))
+                        except Exception:
+                            pass
+                    try:
+                        os.rmdir(tmpdir)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            _wa_clear(sender)
+
+        return ("ok", 200)
+
+    # Fallback: unknown state
+    _wa_reset(sender)
+    _twilio_send_message(sender, "בוא נתחיל מחדש 🙂\nשלח לי בבקשה את קובץ ה-PDF.")
     return ("ok", 200)
